@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "verify": "bun run src/index.ts --",
+    "appleseed": "bun run src/index.ts",
+    "verify": "bun run src/index.ts verify",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
