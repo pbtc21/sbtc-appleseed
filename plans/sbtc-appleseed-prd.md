@@ -1,4 +1,6 @@
-# PRD: sBTC Appleseed
+# PRD: sBTC Appleseed (v1 — Historical)
+
+> **Note:** This is the original v1 PRD. See `appleseed-v2-prd.md` for the full adoption engine.
 
 ## Overview
 

@@ -1,4 +1,6 @@
-# PRD: sBTC Appleseed v2
+# PRD: sBTC Appleseed v2 (Completed)
+
+> **Status:** All phases implemented. See [README](../README.md) for usage.
 
 ## Overview
 

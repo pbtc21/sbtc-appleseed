@@ -72,9 +72,10 @@ Rich terminal output showing:
 
 - Web UI dashboard (CLI-only for now)
 - Multi-chain support beyond Stacks
-- Automated endpoint discovery (manual addition for now, auto-discovery is v3)
 - Payment to devs/bounties
 - Multi-wallet support
+
+> **Note:** Automated discovery was originally planned for v3 but was completed in v2 via the `discover` command (GitHub code search).
 
 ## Success Criteria
 

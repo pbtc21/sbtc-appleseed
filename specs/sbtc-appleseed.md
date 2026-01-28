@@ -1,4 +1,6 @@
-# Spec: sBTC Appleseed
+# Spec: sBTC Appleseed (v1 — Historical)
+
+> **Note:** This is the original v1 spec. See `appleseed-v2.md` for the full adoption engine, and the [README](../README.md) for current capabilities.
 
 ## Problem
 
