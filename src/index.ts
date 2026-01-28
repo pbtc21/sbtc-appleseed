@@ -313,6 +313,18 @@ async function cmdAdd(args: string[], config: Config) {
     process.exit(1);
   }
 
+  // Validate URL scheme (security: prevent javascript:, file://, etc.)
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      console.log(`  Error: Only http/https URLs allowed (got ${parsed.protocol})\n`);
+      process.exit(1);
+    }
+  } catch {
+    console.log(`  Error: Invalid URL format\n`);
+    process.exit(1);
+  }
+
   // Probe to validate
   console.log(`  [probe] Checking ${url}...`);
   const probe = await probeEndpoint(url);

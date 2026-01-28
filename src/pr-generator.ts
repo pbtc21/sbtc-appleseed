@@ -1,6 +1,7 @@
 import type { Config } from "./config";
 import type { EvalReport } from "./evaluate";
 import { updateEndpoint, getEndpoint } from "./db";
+import { randomUUID } from "crypto";
 
 /**
  * Fork a repo, create a branch with sBTC integration changes, and open a PR.
@@ -12,7 +13,8 @@ export async function generateSbtcPR(
   const { owner, repo } = parseRepoUrl(report.repoUrl);
   const repoName = `${owner}/${repo}`;
   const branchName = "feat/add-sbtc-x402";
-  const tmpDir = `/tmp/appleseed-pr-${repo}-${Date.now()}`;
+  // Use randomUUID to prevent temp directory race condition (TOCTOU)
+  const tmpDir = `/tmp/appleseed-pr-${randomUUID()}`;
 
   console.log(`  [pr-gen] Forking ${repoName}...`);
 

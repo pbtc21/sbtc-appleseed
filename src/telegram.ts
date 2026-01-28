@@ -5,6 +5,18 @@ import { formatSats } from "./wallet";
 
 const API = "https://api.telegram.org/bot";
 
+/**
+ * Escape HTML special characters to prevent injection.
+ */
+function escapeHtml(str: string | null | undefined): string {
+  if (!str) return "";
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 async function send(
   config: Config,
   text: string,
@@ -39,12 +51,12 @@ export async function alertEndpointDown(
   const text = [
     `🔴 <b>Endpoint DOWN</b>`,
     ``,
-    `<b>URL:</b> <code>${endpoint.url}</code>`,
-    `<b>Status:</b> ${endpoint.status} → broken`,
-    `<b>Error:</b> ${error}`,
-    endpoint.repo_url ? `<b>Repo:</b> ${endpoint.repo_url}` : "",
+    `<b>URL:</b> <code>${escapeHtml(endpoint.url)}</code>`,
+    `<b>Status:</b> ${escapeHtml(endpoint.status)} → broken`,
+    `<b>Error:</b> ${escapeHtml(error)}`,
+    endpoint.repo_url ? `<b>Repo:</b> ${escapeHtml(endpoint.repo_url)}` : "",
     ``,
-    `Last check: ${endpoint.last_check || "never"}`,
+    `Last check: ${escapeHtml(endpoint.last_check) || "never"}`,
   ]
     .filter(Boolean)
     .join("\n");
@@ -59,9 +71,9 @@ export async function alertEndpointRecovered(
   const text = [
     `🟢 <b>Endpoint RECOVERED</b>`,
     ``,
-    `<b>URL:</b> <code>${endpoint.url}</code>`,
+    `<b>URL:</b> <code>${escapeHtml(endpoint.url)}</code>`,
     `<b>Status:</b> broken → verified`,
-    endpoint.repo_url ? `<b>Repo:</b> ${endpoint.repo_url}` : "",
+    endpoint.repo_url ? `<b>Repo:</b> ${escapeHtml(endpoint.repo_url)}` : "",
   ]
     .filter(Boolean)
     .join("\n");
@@ -80,26 +92,30 @@ export async function alertVerifyResult(
   const lines = [
     `${icon} <b>Verify: ${status}</b>`,
     ``,
-    `<b>URL:</b> <code>${result.endpoint}</code>`,
-    `<b>Protocol:</b> x402 ${result.probe.version || "unknown"}`,
+    `<b>URL:</b> <code>${escapeHtml(result.endpoint)}</code>`,
+    `<b>Protocol:</b> x402 ${escapeHtml(result.probe.version) || "unknown"}`,
   ];
 
   if (result.probe.sbtcOption) {
     lines.push(
-      `<b>sBTC:</b> ${formatSats(result.probe.sbtcOption.amount)} → ${result.probe.sbtcOption.payTo}`
+      `<b>sBTC:</b> ${formatSats(result.probe.sbtcOption.amount)} → ${escapeHtml(result.probe.sbtcOption.payTo)}`
     );
   }
 
   if (result.payment) {
     if (result.payment.success) {
-      lines.push(`<b>Payment:</b> ${result.payment.amount} sats`);
+      lines.push(`<b>Payment:</b> ${escapeHtml(result.payment.amount)} sats`);
       if (result.payment.txId) {
+        // Validate txId is hex only to prevent URL injection
+        const safeTxId = /^0x[a-fA-F0-9]+$/.test(result.payment.txId)
+          ? result.payment.txId
+          : escapeHtml(result.payment.txId);
         lines.push(
-          `<b>TX:</b> <a href="https://explorer.hiro.so/txid/${result.payment.txId}">view</a>`
+          `<b>TX:</b> <a href="https://explorer.hiro.so/txid/${safeTxId}">view</a>`
         );
       }
     } else {
-      lines.push(`<b>Payment error:</b> ${result.payment.error}`);
+      lines.push(`<b>Payment error:</b> ${escapeHtml(result.payment.error)}`);
     }
   }
 

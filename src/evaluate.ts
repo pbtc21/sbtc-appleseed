@@ -1,5 +1,6 @@
 import type { Config } from "./config";
 import { updateEndpoint, getEndpoint } from "./db";
+import { randomUUID } from "crypto";
 
 export interface EvalReport {
   repoUrl: string;
@@ -30,7 +31,8 @@ export async function evaluateRepo(
 ): Promise<EvalReport> {
   const { owner, repo } = parseRepoUrl(repoUrl);
   const repoName = `${owner}/${repo}`;
-  const tmpDir = `/tmp/appleseed-eval-${repo}-${Date.now()}`;
+  // Use randomUUID to prevent temp directory race condition (TOCTOU)
+  const tmpDir = `/tmp/appleseed-eval-${randomUUID()}`;
 
   console.log(`  [evaluate] Cloning ${repoName}...`);
 
