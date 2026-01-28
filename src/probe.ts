@@ -4,6 +4,7 @@ import type {
   PaymentRequiredV2,
   AcceptOption,
   SbtcPaymentOption,
+  ContractCallPayment,
 } from "./types";
 
 const STACKS_NETWORK_PREFIXES = ["stacks:1", "stacks:2147483648"];
@@ -127,6 +128,7 @@ function parseV1(body: unknown): ProbeResult {
   let network: string;
   let nonce: string;
   let expiresAt: string;
+  let contractCall: ContractCallPayment | undefined;
 
   if (obj.payment && typeof obj.payment === "object") {
     // Nested payment format (e.g. pbtc21 endpoints)
@@ -137,6 +139,19 @@ function parseV1(body: unknown): ProbeResult {
     network = String(p.network || "mainnet");
     nonce = String(obj.nonce || "");
     expiresAt = String(obj.expiresAt || "");
+
+    // Detect contract-call payment model
+    if (typeof p.contract === "string" && typeof p.function === "string") {
+      const parts = p.contract.split(".");
+      if (parts.length === 2) {
+        contractCall = {
+          contractAddress: parts[0],
+          contractName: parts[1],
+          functionName: String(p.function),
+          price: parseInt(amount, 10),
+        };
+      }
+    }
   } else {
     // Standard v1 format
     amount = String(obj.maxAmountRequired || "0");
@@ -180,6 +195,7 @@ function parseV1(body: unknown): ProbeResult {
       facilitatorUrl: "https://facilitator.stacksx402.com",
       tokenType,
       raw: normalized,
+      contractCall,
     },
     allAccepts: [accept],
     raw402Body: body,

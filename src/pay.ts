@@ -64,6 +64,11 @@ async function payV1(
   option: SbtcPaymentOption,
   config: Config
 ): Promise<PayResult> {
+  // Route to contract-call flow if detected
+  if (option.contractCall) {
+    return payV1ContractCall(url, option, config);
+  }
+
   const { X402PaymentClient } = await import("x402-stacks");
 
   const client = new X402PaymentClient({
@@ -189,8 +194,7 @@ async function payV1(
   const res = await fetch(url, {
     method: "GET",
     headers: {
-      "X-PAYMENT": txId!,
-      "x-payment": txId!,
+      "X-Payment": txId!,
     },
     signal: AbortSignal.timeout(60000),
   });
@@ -207,6 +211,167 @@ function hexToBytes(hex: string): Uint8Array {
     bytes[i / 2] = parseInt(clean.substring(i, i + 2), 16);
   }
   return bytes;
+}
+
+/**
+ * v1 contract-call flow: Build contract call tx → broadcast → poll → X-PAYMENT header
+ *
+ * Used when the 402 body specifies payment.contract + payment.function,
+ * meaning the endpoint expects a contract call rather than a simple STX transfer.
+ */
+async function payV1ContractCall(
+  url: string,
+  option: SbtcPaymentOption,
+  config: Config
+): Promise<PayResult> {
+  const {
+    makeContractCall,
+    broadcastTransaction,
+    AnchorMode,
+    PostConditionMode,
+    FungibleConditionCode,
+    makeStandardSTXPostCondition,
+    getAddressFromPrivateKey,
+    TransactionVersion,
+  } = await import("@stacks/transactions");
+
+  const cc = option.contractCall!;
+
+  // Derive sender address for post-condition
+  const txVersion =
+    config.network === "mainnet"
+      ? TransactionVersion.Mainnet
+      : TransactionVersion.Testnet;
+  const senderAddress = getAddressFromPrivateKey(config.privateKey, txVersion);
+
+  // Post-condition: sender sends at most `price` uSTX
+  const postCondition = makeStandardSTXPostCondition(
+    senderAddress,
+    FungibleConditionCode.LessEqual,
+    cc.price
+  );
+
+  console.log(
+    `  [pay] Building contract-call: ${cc.contractAddress}.${cc.contractName}::${cc.functionName} (${cc.price} uSTX)`
+  );
+
+  const tx = await makeContractCall({
+    contractAddress: cc.contractAddress,
+    contractName: cc.contractName,
+    functionName: cc.functionName,
+    functionArgs: [],
+    senderKey: config.privateKey,
+    network: config.network,
+    anchorMode: AnchorMode.Any,
+    postConditionMode: PostConditionMode.Deny,
+    postConditions: [postCondition],
+    validateWithAbi: false,
+  });
+
+  // Broadcast
+  const broadcastResult = await broadcastTransaction(tx, config.network);
+
+  if (broadcastResult.error) {
+    return {
+      success: false,
+      resourceDelivered: false,
+      httpStatus: 0,
+      bodyLength: 0,
+      bodyPreview: "",
+      txId: null,
+      amount: option.amount,
+      recipient: `${cc.contractAddress}.${cc.contractName}`,
+      error: `Broadcast failed: ${broadcastResult.error} - ${broadcastResult.reason || ""}`,
+    };
+  }
+
+  let txId = broadcastResult.txid;
+  if (txId && !txId.startsWith("0x")) {
+    txId = `0x${txId}`;
+  }
+
+  console.log(`  [pay] Broadcast contract-call TX: ${txId}`);
+  console.log(`  [pay] Waiting for confirmation + endpoint verification...`);
+
+  // Unified loop: poll Hiro for confirmation, then try the endpoint.
+  // Stacks blocks can take 5s–120s+, and the endpoint needs its own indexing
+  // time after on-chain confirmation. Total budget: 3 minutes.
+  const hiroBase =
+    config.network === "mainnet"
+      ? "https://api.hiro.so"
+      : "https://api.testnet.hiro.so";
+
+  let confirmed = false;
+  let res: Response | null = null;
+
+  for (let attempt = 0; attempt < 36; attempt++) {
+    await new Promise((r) => setTimeout(r, 5000));
+
+    // Phase 1: wait for on-chain confirmation
+    if (!confirmed) {
+      try {
+        const checkRes = await fetch(
+          `${hiroBase}/extended/v1/tx/${txId}`,
+          { signal: AbortSignal.timeout(5000) }
+        );
+        if (checkRes.ok) {
+          const txData = (await checkRes.json()) as { tx_status?: string };
+          if (txData.tx_status === "success") {
+            confirmed = true;
+            console.log(`  [pay] TX confirmed (attempt ${attempt + 1})`);
+          } else if (txData.tx_status === "pending") {
+            console.log(`  [pay] TX pending (attempt ${attempt + 1}/36)...`);
+            continue;
+          }
+        }
+      } catch {
+        // Ignore polling errors
+      }
+      if (!confirmed) continue;
+    }
+
+    // Phase 2: try the endpoint (TX is confirmed)
+    res = await fetch(url, {
+      method: "GET",
+      headers: { "X-Payment": txId! },
+      signal: AbortSignal.timeout(60000),
+    });
+
+    if (res.status >= 200 && res.status < 300) {
+      console.log(`  [pay] Endpoint accepted payment`);
+      break;
+    }
+
+    if (res.status === 403 || res.status === 402) {
+      console.log(`  [pay] Endpoint not ready (${res.status}), retrying...`);
+      continue;
+    }
+
+    // Non-retriable status
+    break;
+  }
+
+  if (!confirmed) {
+    console.log(`  [pay] TX not confirmed after 3 min`);
+  }
+
+  if (!res) {
+    return {
+      success: false,
+      resourceDelivered: false,
+      httpStatus: 0,
+      bodyLength: 0,
+      bodyPreview: "",
+      txId,
+      amount: option.amount,
+      recipient: `${cc.contractAddress}.${cc.contractName}`,
+      error: "TX never confirmed within timeout",
+    };
+  }
+
+  const result = await buildPayResult(res, option);
+  result.txId = txId;
+  return result;
 }
 
 /**

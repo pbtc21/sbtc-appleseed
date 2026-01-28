@@ -49,6 +49,13 @@ export interface ProbeResult {
   error?: string;
 }
 
+export interface ContractCallPayment {
+  contractAddress: string;
+  contractName: string;
+  functionName: string;
+  price: number;
+}
+
 export interface SbtcPaymentOption {
   version: ProtocolVersion;
   amount: string;
@@ -58,6 +65,8 @@ export interface SbtcPaymentOption {
   tokenType: string;
   /** Original parsed object for passing to payment SDK */
   raw: PaymentRequiredV1 | AcceptOption;
+  /** If set, pay via contract call instead of simple STX transfer */
+  contractCall?: ContractCallPayment;
 }
 
 export interface PayResult {
