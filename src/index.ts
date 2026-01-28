@@ -7,6 +7,7 @@ import { postReport } from "./report";
 import { updateCRM } from "./crm";
 import { addEndpoint, listEndpoints, updateEndpoint } from "./db";
 import { discoverEndpoints } from "./discover";
+import { runMonitorPass, runMonitorLoop, sendDigest } from "./monitor";
 import { alertEndpointDown, alertEndpointRecovered, alertBatchSummary, alertVerifyResult } from "./telegram";
 import type { VerifyResult } from "./types";
 import type { EndpointStatus, Endpoint } from "./db";
@@ -19,6 +20,8 @@ const HELP = `
     add       Register an endpoint in the registry
     list      Show all tracked endpoints
     discover  Search GitHub for x402 endpoints
+    monitor   Run monitoring pass or continuous loop
+    digest    Send daily status digest
 
   verify:
     --endpoint, -e <url>    Single endpoint to verify
@@ -40,6 +43,13 @@ const HELP = `
     --language <lang>       Filter by language (ts, js, python, go)
     --limit <n>             Max results (default: 50)
     --dry-run               Preview without inserting
+
+  monitor:
+    --once                  Single pass (default: continuous loop)
+    --interval <minutes>    Loop interval (default: 30)
+    --healthy <hours>       Healthy recheck interval (default: 24)
+    --broken <hours>        Broken recheck interval (default: 6)
+    --dry-run               Probe only, skip payment
 
   Examples:
     bun run appleseed verify -e https://api.example.com/data
@@ -94,6 +104,10 @@ async function main() {
       return cmdList(args, config);
     case "discover":
       return cmdDiscover(args, config);
+    case "monitor":
+      return cmdMonitor(args, config);
+    case "digest":
+      return cmdDigest(config);
     case "help":
     default:
       console.log(HELP);
@@ -360,6 +374,40 @@ async function cmdDiscover(args: string[], config: Config) {
   console.log(`  Score: ${byScore.high} high, ${byScore.medium} medium, ${byScore.low} low`);
   if (dryRun) console.log(`  (dry-run — nothing inserted)`);
   console.log("");
+}
+
+// ── monitor ──────────────────────────────────────────────
+
+async function cmdMonitor(args: string[], config: Config) {
+  const flags = parseFlags(args);
+  const once = !!flags.once;
+  const dryRun = !!flags["dry-run"];
+  const intervalMinutes = flags.interval ? parseInt(String(flags.interval), 10) : 30;
+  const healthyHours = flags.healthy ? parseInt(String(flags.healthy), 10) : 24;
+  const brokenHours = flags.broken ? parseInt(String(flags.broken), 10) : 6;
+
+  const opts = {
+    healthyIntervalHours: healthyHours,
+    brokenIntervalHours: brokenHours,
+    dryRun,
+  };
+
+  if (once) {
+    const result = await runMonitorPass(config, opts);
+    console.log(`\n  --- Monitor Pass ---`);
+    console.log(`  Checked: ${result.checked}`);
+    console.log(`  Healthy: ${result.healthy}  Broken: ${result.broken}`);
+    if (result.recovered > 0) console.log(`  Recovered: ${result.recovered}`);
+    if (result.newlyBroken > 0) console.log(`  Newly broken: ${result.newlyBroken}`);
+    console.log("");
+    process.exit(result.newlyBroken > 0 ? 1 : 0);
+  } else {
+    await runMonitorLoop(config, { ...opts, intervalMinutes });
+  }
+}
+
+async function cmdDigest(config: Config) {
+  await sendDigest(config);
 }
 
 // ── helpers ───────────────────────────────────────────────
