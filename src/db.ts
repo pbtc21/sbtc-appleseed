@@ -97,6 +97,21 @@ export function listEndpoints(dbPath: string, status?: EndpointStatus): Endpoint
   return db.prepare("SELECT * FROM endpoints ORDER BY updated_at DESC").all() as Endpoint[];
 }
 
+// Whitelist of allowed column names to prevent SQL injection
+const ALLOWED_COLUMNS = new Set([
+  "url",
+  "repo_url",
+  "issue_url",
+  "pr_url",
+  "status",
+  "token_type",
+  "last_check",
+  "last_result",
+  "total_spent",
+  "notes",
+  "updated_at",
+]);
+
 export function updateEndpoint(
   dbPath: string,
   urlOrId: string | number,
@@ -108,6 +123,11 @@ export function updateEndpoint(
 
   for (const [key, val] of Object.entries(updates)) {
     if (val !== undefined) {
+      // SQL injection protection: only allow whitelisted columns
+      if (!ALLOWED_COLUMNS.has(key)) {
+        console.error(`[db] Blocked invalid column name: ${key}`);
+        continue;
+      }
       fields.push(`${key} = ?`);
       values.push(val);
     }

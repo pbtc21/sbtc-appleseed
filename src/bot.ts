@@ -169,7 +169,13 @@ async function handleCheck(
     return;
   }
 
-  await sendMessage(token, chatId, `🔍 Probing ${url}...`);
+  // SSRF protection: block internal/private URLs
+  if (!isUrlSafe(url)) {
+    await sendMessage(token, chatId, "⛔ URL blocked: cannot probe internal/private addresses");
+    return;
+  }
+
+  await sendMessage(token, chatId, `🔍 Probing ${escapeHtml(url)}...`);
 
   try {
     const probe = await probeEndpoint(url);
@@ -186,13 +192,13 @@ async function handleCheck(
     const lines = [
       `✅ <b>Probe Success</b>`,
       ``,
-      `<b>URL:</b> <code>${url}</code>`,
-      `<b>Protocol:</b> x402 ${probe.version || "unknown"}`,
+      `<b>URL:</b> <code>${escapeHtml(url)}</code>`,
+      `<b>Protocol:</b> x402 ${escapeHtml(probe.version || "unknown")}`,
     ];
 
     if (probe.sbtcOption) {
       lines.push(`<b>sBTC:</b> ${formatSats(probe.sbtcOption.amount)} sats`);
-      lines.push(`<b>Pay to:</b> <code>${probe.sbtcOption.payTo}</code>`);
+      lines.push(`<b>Pay to:</b> <code>${escapeHtml(probe.sbtcOption.payTo)}</code>`);
     } else {
       lines.push(`<b>sBTC:</b> Not accepted`);
     }
@@ -222,6 +228,52 @@ async function handleHelp(chatId: number, token: string): Promise<void> {
   await sendMessage(token, chatId, text);
 }
 
+// ── Security helpers ──────────────────────────────────────
+
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function isUrlSafe(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+
+    // Block private/internal IPs
+    if (
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      host.startsWith("192.168.") ||
+      host.startsWith("10.") ||
+      host.startsWith("172.16.") ||
+      host.startsWith("172.17.") ||
+      host.startsWith("172.18.") ||
+      host.startsWith("172.19.") ||
+      host.startsWith("172.2") ||
+      host.startsWith("172.30.") ||
+      host.startsWith("172.31.") ||
+      host === "169.254.169.254" ||  // AWS metadata
+      host.endsWith(".internal") ||
+      host.endsWith(".local")
+    ) {
+      return false;
+    }
+
+    // Only allow http/https
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return false;
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ── Main loop ──────────────────────────────────────────────
 
 async function processUpdate(update: Update, config: Config): Promise<void> {
@@ -232,12 +284,23 @@ async function processUpdate(update: Update, config: Config): Promise<void> {
   const text = msg.text.trim();
   const token = config.telegramBotToken;
 
+  // Authorization: only respond to configured chat ID
+  const authorizedChatId = config.telegramChatId ? parseInt(config.telegramChatId, 10) : null;
+  if (authorizedChatId && chatId !== authorizedChatId) {
+    // Allow /start for anyone (so they can get their chat ID)
+    if (!text.toLowerCase().startsWith("/start")) {
+      console.log(`[bot] Unauthorized: ${chatId} (expected ${authorizedChatId})`);
+      await sendMessage(token, chatId, "⛔ Unauthorized. This bot is private.");
+      return;
+    }
+  }
+
   // Parse command
   const parts = text.split(/\s+/);
   const cmd = parts[0].toLowerCase().replace("@aibtc_appleseed_bot", "");
   const arg = parts.slice(1).join(" ");
 
-  console.log(`[bot] ${msg.from?.username || chatId}: ${text}`);
+  console.log(`[bot] ${msg.from?.username || chatId}: ${cmd}`);
 
   switch (cmd) {
     case "/start":

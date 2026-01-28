@@ -79,7 +79,17 @@ export async function openOutreachIssue(
 function parseRepoUrl(url: string): { owner: string; repo: string } {
   const match = url.match(/github\.com\/([^/]+)\/([^/]+)/);
   if (!match) throw new Error(`Invalid GitHub repo URL: ${url}`);
-  return { owner: match[1], repo: match[2].replace(/\.git$/, "") };
+
+  const owner = match[1].replace(/\.git$/, "");
+  const repo = match[2].replace(/\.git$/, "");
+
+  // Security: validate owner/repo contain only safe characters
+  const safePattern = /^[a-zA-Z0-9_.-]+$/;
+  if (!safePattern.test(owner) || !safePattern.test(repo)) {
+    throw new Error(`Invalid characters in repo URL: ${url}`);
+  }
+
+  return { owner, repo };
 }
 
 // ── Templates ────────────────────────────────────────────

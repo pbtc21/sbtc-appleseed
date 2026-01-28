@@ -2,6 +2,44 @@ import type { Config } from "./config";
 import { addEndpoint, getEndpoint } from "./db";
 import { probeEndpoint } from "./probe";
 
+/**
+ * SSRF protection: validate URL before probing.
+ */
+function isUrlSafe(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+
+    // Block private/internal IPs
+    if (
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      host.startsWith("192.168.") ||
+      host.startsWith("10.") ||
+      host.startsWith("172.16.") ||
+      host.startsWith("172.17.") ||
+      host.startsWith("172.18.") ||
+      host.startsWith("172.19.") ||
+      host.startsWith("172.2") ||
+      host.startsWith("172.30.") ||
+      host.startsWith("172.31.") ||
+      host === "169.254.169.254" ||
+      host.endsWith(".internal") ||
+      host.endsWith(".local")
+    ) {
+      return false;
+    }
+
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return false;
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 interface DiscoverResult {
   repo: string;
   url: string;
@@ -176,9 +214,9 @@ async function evaluateRepo(
     score = "medium";
   }
 
-  // Probe if we found a URL
+  // Probe if we found a URL (with SSRF protection)
   let probeSuccess = false;
-  if (endpointUrl && !dryRun) {
+  if (endpointUrl && !dryRun && isUrlSafe(endpointUrl)) {
     try {
       const probe = await probeEndpoint(endpointUrl);
       probeSuccess = probe.success;
