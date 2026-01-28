@@ -1,0 +1,16 @@
+{
+  "name": "sbtc-appleseed",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "verify": "bun run src/index.ts --",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "x402-stacks": "^1.1.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/bun": "latest"
+  }
+}
