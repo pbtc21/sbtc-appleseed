@@ -167,7 +167,7 @@ async function main() {
 
   // Summary
   console.log(`\n  --- Result ---`);
-  const passed = payResult?.success ?? false;
+  const passed = args.dryRun ? probe.success : (payResult?.success ?? false);
   console.log(`  Status: ${passed ? "PASSED" : "FAILED"}`);
   console.log(`  Endpoint: ${args.endpoint}`);
   if (payResult) {
