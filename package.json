@@ -5,6 +5,7 @@
   "scripts": {
     "appleseed": "bun run src/index.ts",
     "verify": "bun run src/index.ts verify",
+    "bot": "bun run src/bot.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
