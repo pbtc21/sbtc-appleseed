@@ -9,6 +9,9 @@ import { addEndpoint, listEndpoints, updateEndpoint } from "./db";
 import { discoverEndpoints } from "./discover";
 import { runMonitorPass, runMonitorLoop, sendDigest } from "./monitor";
 import { alertEndpointDown, alertEndpointRecovered, alertBatchSummary, alertVerifyResult } from "./telegram";
+import { openOutreachIssue } from "./outreach";
+import { evaluateRepo, printReport } from "./evaluate";
+import { generateSbtcPR } from "./pr-generator";
 import type { VerifyResult } from "./types";
 import type { EndpointStatus, Endpoint } from "./db";
 
@@ -22,6 +25,8 @@ const HELP = `
     discover  Search GitHub for x402 endpoints
     monitor   Run monitoring pass or continuous loop
     digest    Send daily status digest
+    outreach  Open a GitHub issue to propose sBTC support
+    evaluate  Analyze a repo for x402/sBTC integration
 
   verify:
     --endpoint, -e <url>    Single endpoint to verify
@@ -51,12 +56,23 @@ const HELP = `
     --broken <hours>        Broken recheck interval (default: 6)
     --dry-run               Probe only, skip payment
 
+  outreach:
+    <url>                   Endpoint URL
+    --repo <github-url>     GitHub repo to open issue on
+
+  evaluate:
+    <repo-url>              GitHub repo URL to evaluate
+    --auto                  Auto-generate PR if possible
+
   Examples:
     bun run appleseed verify -e https://api.example.com/data
     bun run appleseed verify --all
     bun run appleseed add https://api.example.com/data --repo https://github.com/org/repo
     bun run appleseed list --status verified
     bun run appleseed discover --language ts --limit 20
+    bun run appleseed monitor --once
+    bun run appleseed outreach https://api.example.com/data --repo https://github.com/org/repo
+    bun run appleseed evaluate https://github.com/org/repo --auto
 `;
 
 function parseCommand(): { command: string; args: string[] } {
@@ -108,6 +124,10 @@ async function main() {
       return cmdMonitor(args, config);
     case "digest":
       return cmdDigest(config);
+    case "outreach":
+      return cmdOutreach(args, config);
+    case "evaluate":
+      return cmdEvaluate(args, config);
     case "help":
     default:
       console.log(HELP);
@@ -408,6 +428,58 @@ async function cmdMonitor(args: string[], config: Config) {
 
 async function cmdDigest(config: Config) {
   await sendDigest(config);
+}
+
+// ── outreach ─────────────────────────────────────────────
+
+async function cmdOutreach(args: string[], config: Config) {
+  const flags = parseFlags(args);
+  const endpointUrl = (flags._pos || flags.endpoint || flags.e) as string | undefined;
+  const repoUrl = flags.repo as string | undefined;
+
+  if (!repoUrl) {
+    console.log("  Usage: appleseed outreach <endpoint-url> --repo <github-repo-url>\n");
+    process.exit(1);
+  }
+
+  console.log(`  [outreach] Opening issue on ${repoUrl}...`);
+  const issueUrl = await openOutreachIssue(repoUrl, endpointUrl || null, config);
+
+  if (issueUrl) {
+    console.log(`  Issue: ${issueUrl}\n`);
+  } else {
+    console.log("  Failed to open issue.\n");
+    process.exit(1);
+  }
+}
+
+// ── evaluate ─────────────────────────────────────────────
+
+async function cmdEvaluate(args: string[], config: Config) {
+  const flags = parseFlags(args);
+  const repoUrl = flags._pos as string;
+  const auto = !!flags.auto;
+
+  if (!repoUrl) {
+    console.log("  Usage: appleseed evaluate <github-repo-url> [--auto]\n");
+    process.exit(1);
+  }
+
+  console.log(`  [evaluate] Analyzing ${repoUrl}...`);
+  const report = await evaluateRepo(repoUrl, config);
+  printReport(report);
+
+  if (auto && !report.hasSbtc) {
+    console.log("  [pr-gen] Auto mode — generating PR...");
+    const prUrl = await generateSbtcPR(report, config);
+    if (prUrl) {
+      console.log(`  PR: ${prUrl}\n`);
+    } else {
+      console.log("  PR generation skipped or failed.\n");
+    }
+  } else if (!auto && !report.hasSbtc) {
+    console.log("  Tip: add --auto to generate a PR with sBTC integration\n");
+  }
 }
 
 // ── helpers ───────────────────────────────────────────────
