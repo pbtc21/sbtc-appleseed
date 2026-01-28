@@ -69,6 +69,11 @@ async function payV1(
     return payV1ContractCall(url, option, config);
   }
 
+  // Route to sBTC SIP-010 transfer if token type is sBTC
+  if (isSbtcToken(option.tokenType)) {
+    return payV1Sbtc(url, option, config);
+  }
+
   const { X402PaymentClient } = await import("x402-stacks");
 
   const client = new X402PaymentClient({
@@ -255,6 +260,8 @@ async function payV1ContractCall(
     `  [pay] Building contract-call: ${cc.contractAddress}.${cc.contractName}::${cc.functionName} (${cc.price} uSTX)`
   );
 
+  const fee = await estimateFee(config);
+
   const tx = await makeContractCall({
     contractAddress: cc.contractAddress,
     contractName: cc.contractName,
@@ -265,11 +272,14 @@ async function payV1ContractCall(
     anchorMode: AnchorMode.Any,
     postConditionMode: PostConditionMode.Deny,
     postConditions: [postCondition],
+    fee,
     validateWithAbi: false,
   });
 
-  // Broadcast
-  const broadcastResult = await broadcastTransaction(tx, config.network);
+  // Broadcast with retry
+  const broadcastResult = await broadcastWithRetry(
+    () => broadcastTransaction(tx, config.network)
+  );
 
   if (broadcastResult.error) {
     return {
@@ -291,87 +301,8 @@ async function payV1ContractCall(
   }
 
   console.log(`  [pay] Broadcast contract-call TX: ${txId}`);
-  console.log(`  [pay] Waiting for confirmation + endpoint verification...`);
 
-  // Unified loop: poll Hiro for confirmation, then try the endpoint.
-  // Stacks blocks can take 5s–120s+, and the endpoint needs its own indexing
-  // time after on-chain confirmation. Total budget: 3 minutes.
-  const hiroBase =
-    config.network === "mainnet"
-      ? "https://api.hiro.so"
-      : "https://api.testnet.hiro.so";
-
-  let confirmed = false;
-  let res: Response | null = null;
-
-  for (let attempt = 0; attempt < 36; attempt++) {
-    await new Promise((r) => setTimeout(r, 5000));
-
-    // Phase 1: wait for on-chain confirmation
-    if (!confirmed) {
-      try {
-        const checkRes = await fetch(
-          `${hiroBase}/extended/v1/tx/${txId}`,
-          { signal: AbortSignal.timeout(5000) }
-        );
-        if (checkRes.ok) {
-          const txData = (await checkRes.json()) as { tx_status?: string };
-          if (txData.tx_status === "success") {
-            confirmed = true;
-            console.log(`  [pay] TX confirmed (attempt ${attempt + 1})`);
-          } else if (txData.tx_status === "pending") {
-            console.log(`  [pay] TX pending (attempt ${attempt + 1}/36)...`);
-            continue;
-          }
-        }
-      } catch {
-        // Ignore polling errors
-      }
-      if (!confirmed) continue;
-    }
-
-    // Phase 2: try the endpoint (TX is confirmed)
-    res = await fetch(url, {
-      method: "GET",
-      headers: { "X-Payment": txId! },
-      signal: AbortSignal.timeout(60000),
-    });
-
-    if (res.status >= 200 && res.status < 300) {
-      console.log(`  [pay] Endpoint accepted payment`);
-      break;
-    }
-
-    if (res.status === 403 || res.status === 402) {
-      console.log(`  [pay] Endpoint not ready (${res.status}), retrying...`);
-      continue;
-    }
-
-    // Non-retriable status
-    break;
-  }
-
-  if (!confirmed) {
-    console.log(`  [pay] TX not confirmed after 3 min`);
-  }
-
-  if (!res) {
-    return {
-      success: false,
-      resourceDelivered: false,
-      httpStatus: 0,
-      bodyLength: 0,
-      bodyPreview: "",
-      txId,
-      amount: option.amount,
-      recipient: `${cc.contractAddress}.${cc.contractName}`,
-      error: "TX never confirmed within timeout",
-    };
-  }
-
-  const result = await buildPayResult(res, option);
-  result.txId = txId;
-  return result;
+  return awaitConfirmationAndRetry(url, txId, option, config);
 }
 
 /**
@@ -451,6 +382,268 @@ async function payV2(
   });
 
   return await buildPayResult(res, option);
+}
+
+const SBTC_CONTRACT_ADDRESS = "SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4";
+const SBTC_CONTRACT_NAME = "sbtc-token";
+const SBTC_TOKEN_NAME = "sbtc-token";
+
+function isSbtcToken(tokenType: string): boolean {
+  const t = tokenType.toLowerCase();
+  return t === "sbtc" || t.includes("sbtc") || t.includes("token-sbtc");
+}
+
+/**
+ * v1 sBTC flow: SIP-010 transfer → broadcast → poll → X-Payment header
+ */
+async function payV1Sbtc(
+  url: string,
+  option: SbtcPaymentOption,
+  config: Config
+): Promise<PayResult> {
+  const {
+    makeContractCall,
+    broadcastTransaction,
+    AnchorMode,
+    PostConditionMode,
+    FungibleConditionCode,
+    makeStandardFungiblePostCondition,
+    getAddressFromPrivateKey,
+    TransactionVersion,
+    Cl,
+  } = await import("@stacks/transactions");
+
+  const amount = parseInt(option.amount, 10);
+  const txVersion =
+    config.network === "mainnet"
+      ? TransactionVersion.Mainnet
+      : TransactionVersion.Testnet;
+  const senderAddress = getAddressFromPrivateKey(config.privateKey, txVersion);
+
+  // Post-condition: sender sends exactly `amount` of sbtc-token
+  const postCondition = makeStandardFungiblePostCondition(
+    senderAddress,
+    FungibleConditionCode.Equal,
+    amount,
+    `${SBTC_CONTRACT_ADDRESS}.${SBTC_CONTRACT_NAME}::${SBTC_TOKEN_NAME}`
+  );
+
+  console.log(
+    `  [pay] Building sBTC SIP-010 transfer: ${amount} sats → ${option.payTo}`
+  );
+
+  const fee = await estimateFee(config);
+
+  const tx = await makeContractCall({
+    contractAddress: SBTC_CONTRACT_ADDRESS,
+    contractName: SBTC_CONTRACT_NAME,
+    functionName: "transfer",
+    functionArgs: [
+      Cl.uint(amount),
+      Cl.principal(senderAddress),
+      Cl.principal(option.payTo),
+      Cl.none(), // memo
+    ],
+    senderKey: config.privateKey,
+    network: config.network,
+    anchorMode: AnchorMode.Any,
+    postConditionMode: PostConditionMode.Deny,
+    postConditions: [postCondition],
+    fee,
+    validateWithAbi: false,
+  });
+
+  // Broadcast with retry
+  const broadcastResult = await broadcastWithRetry(
+    () => broadcastTransaction(tx, config.network)
+  );
+
+  if (broadcastResult.error) {
+    return {
+      success: false,
+      resourceDelivered: false,
+      httpStatus: 0,
+      bodyLength: 0,
+      bodyPreview: "",
+      txId: null,
+      amount: option.amount,
+      recipient: option.payTo,
+      error: `Broadcast failed: ${broadcastResult.error} - ${broadcastResult.reason || ""}`,
+    };
+  }
+
+  let txId = broadcastResult.txid;
+  if (txId && !txId.startsWith("0x")) {
+    txId = `0x${txId}`;
+  }
+
+  console.log(`  [pay] Broadcast sBTC transfer TX: ${txId}`);
+
+  return awaitConfirmationAndRetry(url, txId, option, config);
+}
+
+/**
+ * Estimate fee with multiplier from config.
+ * Queries Hiro for current fee estimate, applies multiplier.
+ */
+async function estimateFee(config: Config): Promise<number> {
+  const hiroBase =
+    config.network === "mainnet"
+      ? "https://api.hiro.so"
+      : "https://api.testnet.hiro.so";
+
+  try {
+    const res = await fetch(`${hiroBase}/v2/fees/transfer`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (res.ok) {
+      const data = (await res.json()) as { fee_rate: number };
+      // fee_rate is in microSTX per byte, contract calls ~250 bytes
+      const baseFee = Math.max(data.fee_rate * 250, 2000);
+      return Math.ceil(baseFee * config.feeMultiplier);
+    }
+  } catch {
+    // Fall through to default
+  }
+  // Default: 3000 uSTX * multiplier
+  return Math.ceil(3000 * config.feeMultiplier);
+}
+
+/**
+ * Broadcast with exponential backoff retry.
+ * 3 attempts: immediate, 5s, 15s
+ */
+async function broadcastWithRetry(
+  broadcastFn: () => Promise<{ txid: string; error?: string; reason?: string }>
+): Promise<{ txid: string; error?: string; reason?: string }> {
+  const delays = [0, 5000, 15000];
+  let lastResult: { txid: string; error?: string; reason?: string } = {
+    txid: "",
+    error: "No broadcast attempted",
+  };
+
+  for (let i = 0; i < delays.length; i++) {
+    if (delays[i] > 0) {
+      console.log(`  [pay] Broadcast retry ${i}/2 (waiting ${delays[i] / 1000}s)...`);
+      await new Promise((r) => setTimeout(r, delays[i]));
+    }
+
+    try {
+      lastResult = await broadcastFn();
+      // Success - no error field
+      if (!lastResult.error) return lastResult;
+
+      // Permanent errors - don't retry
+      const reason = String(lastResult.reason || "");
+      if (
+        reason.includes("NotEnoughFunds") ||
+        reason.includes("NoSuchContract") ||
+        reason.includes("BadFunctionArgument")
+      ) {
+        return lastResult;
+      }
+
+      // Transient - retry
+      console.log(`  [pay] Broadcast error (attempt ${i + 1}): ${lastResult.reason || lastResult.error}`);
+    } catch (err) {
+      console.log(
+        `  [pay] Broadcast exception (attempt ${i + 1}): ${err instanceof Error ? err.message : String(err)}`
+      );
+      lastResult = {
+        txid: "",
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  return lastResult;
+}
+
+/**
+ * Shared confirmation polling + endpoint retry loop.
+ * Used by contract-call and sBTC transfer flows.
+ */
+async function awaitConfirmationAndRetry(
+  url: string,
+  txId: string,
+  option: SbtcPaymentOption,
+  config: Config
+): Promise<PayResult> {
+  console.log(`  [pay] Waiting for confirmation + endpoint verification...`);
+
+  const hiroBase =
+    config.network === "mainnet"
+      ? "https://api.hiro.so"
+      : "https://api.testnet.hiro.so";
+
+  let confirmed = false;
+  let res: Response | null = null;
+
+  for (let attempt = 0; attempt < 36; attempt++) {
+    await new Promise((r) => setTimeout(r, 5000));
+
+    if (!confirmed) {
+      try {
+        const checkRes = await fetch(
+          `${hiroBase}/extended/v1/tx/${txId}`,
+          { signal: AbortSignal.timeout(5000) }
+        );
+        if (checkRes.ok) {
+          const txData = (await checkRes.json()) as { tx_status?: string };
+          if (txData.tx_status === "success") {
+            confirmed = true;
+            console.log(`  [pay] TX confirmed (attempt ${attempt + 1})`);
+          } else if (txData.tx_status === "pending") {
+            console.log(`  [pay] TX pending (attempt ${attempt + 1}/36)...`);
+            continue;
+          }
+        }
+      } catch {
+        // Ignore polling errors
+      }
+      if (!confirmed) continue;
+    }
+
+    res = await fetch(url, {
+      method: "GET",
+      headers: { "X-Payment": txId },
+      signal: AbortSignal.timeout(60000),
+    });
+
+    if (res.status >= 200 && res.status < 300) {
+      console.log(`  [pay] Endpoint accepted payment`);
+      break;
+    }
+
+    if (res.status === 403 || res.status === 402) {
+      console.log(`  [pay] Endpoint not ready (${res.status}), retrying...`);
+      continue;
+    }
+
+    break;
+  }
+
+  if (!confirmed) {
+    console.log(`  [pay] TX not confirmed after 3 min`);
+  }
+
+  if (!res) {
+    return {
+      success: false,
+      resourceDelivered: false,
+      httpStatus: 0,
+      bodyLength: 0,
+      bodyPreview: "",
+      txId,
+      amount: option.amount,
+      recipient: option.payTo,
+      error: "TX never confirmed within timeout",
+    };
+  }
+
+  const result = await buildPayResult(res, option);
+  result.txId = txId;
+  return result;
 }
 
 async function buildPayResult(
