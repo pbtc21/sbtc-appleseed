@@ -7,8 +7,9 @@ import { postReport } from "./report";
 import { updateCRM } from "./crm";
 import { addEndpoint, listEndpoints, updateEndpoint } from "./db";
 import { discoverEndpoints } from "./discover";
+import { alertEndpointDown, alertEndpointRecovered, alertBatchSummary, alertVerifyResult } from "./telegram";
 import type { VerifyResult } from "./types";
-import type { EndpointStatus } from "./db";
+import type { EndpointStatus, Endpoint } from "./db";
 
 const HELP = `
   sBTC Appleseed — x402 sBTC Adoption Engine
@@ -145,6 +146,8 @@ async function cmdVerify(args: string[], config: Config) {
 
     for (const ep of endpoints) {
       const result = await verifySingle(ep.url, dryRun, issue || null, config);
+      const wasBroken = ep.status === "broken";
+
       if (result) {
         passed++;
         updateEndpoint(config.dbPath, ep.url, {
@@ -153,6 +156,9 @@ async function cmdVerify(args: string[], config: Config) {
           last_result: "passed",
           total_spent: ep.total_spent + parseInt(result.payment?.amount || "0", 10),
         });
+        if (wasBroken) {
+          await alertEndpointRecovered(ep, config);
+        }
       } else {
         failed++;
         updateEndpoint(config.dbPath, ep.url, {
@@ -160,12 +166,16 @@ async function cmdVerify(args: string[], config: Config) {
           last_check: new Date().toISOString(),
           last_result: "failed",
         });
+        if (!wasBroken) {
+          await alertEndpointDown(ep, "Verification failed", config);
+        }
       }
       console.log("");
     }
 
     console.log(`  --- Batch Result ---`);
     console.log(`  Passed: ${passed}  Failed: ${failed}  Total: ${endpoints.length}\n`);
+    await alertBatchSummary(passed, failed, endpoints.length, config);
     process.exit(failed > 0 ? 1 : 0);
     return;
   }
@@ -245,6 +255,9 @@ async function verifySingle(
 
   // CRM
   await updateCRM(result, config);
+
+  // Telegram alert
+  await alertVerifyResult(result, config);
 
   // Summary
   const passed = dryRun ? probe.success : (payResult?.success ?? false);
