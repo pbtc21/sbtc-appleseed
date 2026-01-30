@@ -2,6 +2,14 @@ import type { Config } from "./config";
 import { updateEndpoint, getEndpoint } from "./db";
 import { randomUUID } from "crypto";
 
+export interface McpVerifyResult {
+  repoUrl: string;
+  hasMcp: boolean;
+  mcpPackage: string | null;
+  files: string[];
+  eligible: boolean;
+}
+
 export interface EvalReport {
   repoUrl: string;
   repoName: string;
@@ -9,7 +17,9 @@ export interface EvalReport {
   language: string;
   hasX402: boolean;
   hasSbtc: boolean;
+  hasMcp: boolean;
   x402Package: string | null;
+  mcpPackage: string | null;
   paymentConfig: string | null;
   difficulty: "easy" | "medium" | "hard";
   recommendation: string;
@@ -49,9 +59,10 @@ export async function evaluateRepo(
     const framework = await detectFramework(tmpDir, language);
     const x402Info = await detectX402(tmpDir);
     const sbtcInfo = await detectSbtc(tmpDir);
+    const mcpInfo = await detectMcp(tmpDir);
 
     const difficulty = getDifficulty(framework, x402Info.hasX402, sbtcInfo.hasSbtc);
-    const recommendation = getRecommendation(framework, x402Info, sbtcInfo);
+    const recommendation = getRecommendation(framework, x402Info, sbtcInfo, mcpInfo);
 
     const report: EvalReport = {
       repoUrl,
@@ -60,11 +71,13 @@ export async function evaluateRepo(
       language,
       hasX402: x402Info.hasX402,
       hasSbtc: sbtcInfo.hasSbtc,
+      hasMcp: mcpInfo.hasMcp,
       x402Package: x402Info.package,
+      mcpPackage: mcpInfo.package,
       paymentConfig: x402Info.configFile,
       difficulty,
       recommendation,
-      files: [...x402Info.files, ...sbtcInfo.files],
+      files: [...x402Info.files, ...sbtcInfo.files, ...mcpInfo.files],
     };
 
     // Update DB
@@ -299,6 +312,79 @@ async function detectSbtc(dir: string): Promise<{
   return { hasSbtc, files };
 }
 
+async function detectMcp(dir: string): Promise<{
+  hasMcp: boolean;
+  package: string | null;
+  files: EvalFile[];
+}> {
+  const files: EvalFile[] = [];
+  let hasMcp = false;
+  let pkg: string | null = null;
+
+  // Check for .mcp.json config file
+  const mcpConfigProc = Bun.spawn(
+    ["find", dir, "-name", ".mcp.json", "-o", "-name", "mcp.json"],
+    { stdout: "pipe", stderr: "pipe" }
+  );
+  const mcpConfigOut = await new Response(mcpConfigProc.stdout).text();
+  if (mcpConfigOut.trim()) {
+    hasMcp = true;
+    for (const f of mcpConfigOut.trim().split("\n").filter(Boolean)) {
+      files.push({ path: f.replace(`${dir}/`, ""), relevance: "MCP config file" });
+    }
+  }
+
+  // Check for MCP patterns in code
+  const patterns = [
+    "@aibtc/mcp-server",
+    "mcp-server",
+    "mcpServers",
+    "stacks-mcp",
+  ];
+
+  for (const pattern of patterns) {
+    const proc = Bun.spawn(
+      ["grep", "-rl", "--include=*.ts", "--include=*.js", "--include=*.json", "--include=*.md", pattern, dir],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+    const stdout = await new Response(proc.stdout).text();
+    const matches = stdout.trim().split("\n").filter(Boolean);
+
+    for (const file of matches) {
+      hasMcp = true;
+      const relPath = file.replace(`${dir}/`, "");
+      if (!files.find((f) => f.path === relPath)) {
+        files.push({ path: relPath, relevance: `Contains "${pattern}"` });
+      }
+      if (pattern === "@aibtc/mcp-server") {
+        pkg = "@aibtc/mcp-server";
+      }
+    }
+  }
+
+  // Check package.json for MCP packages
+  const pkgProc = Bun.spawn(["cat", `${dir}/package.json`], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const pkgText = await new Response(pkgProc.stdout).text();
+  try {
+    const pkgJson = JSON.parse(pkgText);
+    const deps = { ...pkgJson.dependencies, ...pkgJson.devDependencies };
+    const mcpPkgs = Object.keys(deps).filter(
+      (d) => d.includes("mcp") || d.includes("@aibtc")
+    );
+    if (mcpPkgs.length > 0) {
+      hasMcp = true;
+      pkg = mcpPkgs.find(p => p.includes("@aibtc")) || mcpPkgs[0];
+    }
+  } catch {
+    // No package.json or not JSON
+  }
+
+  return { hasMcp, package: pkg, files };
+}
+
 function getDifficulty(
   framework: string | null,
   hasX402: boolean,
@@ -315,18 +401,24 @@ function getDifficulty(
 function getRecommendation(
   framework: string | null,
   x402Info: { hasX402: boolean; package: string | null },
-  sbtcInfo: { hasSbtc: boolean }
+  sbtcInfo: { hasSbtc: boolean },
+  mcpInfo: { hasMcp: boolean; package: string | null }
 ): string {
+  const parts: string[] = [];
+
+  // MCP status
+  if (mcpInfo.hasMcp) {
+    parts.push(`Has Stacks MCP${mcpInfo.package ? ` (${mcpInfo.package})` : ""} - eligible for airdrop.`);
+  } else {
+    parts.push("No Stacks MCP found. Add @aibtc/mcp-server for agent verification.");
+  }
+
+  // sBTC/x402 status
   if (sbtcInfo.hasSbtc) {
-    return "Already has sBTC support. Verify endpoint and add to monitoring.";
-  }
-
-  if (x402Info.hasX402) {
-    return `Has x402 via ${x402Info.package || "custom implementation"}. ` +
-      `Add sBTC to the accepts array with stacks-mainnet network and sbtc asset.`;
-  }
-
-  if (framework) {
+    parts.push("Already has sBTC support.");
+  } else if (x402Info.hasX402) {
+    parts.push(`Has x402 via ${x402Info.package || "custom"}. Add sBTC to accepts.`);
+  } else if (framework) {
     const middleware: Record<string, string> = {
       hono: "x402-hono",
       express: "x402-express",
@@ -335,10 +427,12 @@ function getRecommendation(
       fastify: "x402-express (compatible adapter)",
     };
     const pkg = middleware[framework] || "x402 middleware";
-    return `No x402 found. Recommend adding ${pkg} middleware with sBTC payment config.`;
+    parts.push(`No x402 found. Add ${pkg} with sBTC config.`);
+  } else {
+    parts.push("No x402/sBTC found. Manual integration needed.");
   }
 
-  return "No x402 or sBTC found. Manual integration needed — open outreach issue first.";
+  return parts.join(" ");
 }
 
 /**
@@ -349,6 +443,7 @@ export function printReport(report: EvalReport): void {
   console.log(`  Repo: ${report.repoName}`);
   console.log(`  Language: ${report.language}`);
   console.log(`  Framework: ${report.framework || "unknown"}`);
+  console.log(`  Has MCP: ${report.hasMcp ? "yes" : "no"}${report.mcpPackage ? ` (${report.mcpPackage})` : ""}`);
   console.log(`  Has x402: ${report.hasX402 ? "yes" : "no"}${report.x402Package ? ` (${report.x402Package})` : ""}`);
   console.log(`  Has sBTC: ${report.hasSbtc ? "yes" : "no"}`);
   console.log(`  Difficulty: ${report.difficulty}`);
@@ -361,4 +456,45 @@ export function printReport(report: EvalReport): void {
     }
   }
   console.log("");
+}
+
+/**
+ * Quick MCP verification for a GitHub repo.
+ * Used by aibtc-agent to verify agents have Stacks MCP setup.
+ */
+export async function verifyMcp(repoUrl: string): Promise<McpVerifyResult> {
+  const { owner, repo } = parseRepoUrl(repoUrl);
+  const repoName = `${owner}/${repo}`;
+  const tmpDir = `/tmp/appleseed-mcp-${randomUUID()}`;
+
+  try {
+    // Shallow clone
+    const clone = Bun.spawn(
+      ["gh", "repo", "clone", repoName, tmpDir, "--", "--depth=1"],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+    await clone.exited;
+
+    const mcpInfo = await detectMcp(tmpDir);
+
+    // Cleanup
+    Bun.spawn(["rm", "-rf", tmpDir], { stdout: "pipe", stderr: "pipe" });
+
+    return {
+      repoUrl,
+      hasMcp: mcpInfo.hasMcp,
+      mcpPackage: mcpInfo.package,
+      files: mcpInfo.files.map(f => f.path),
+      eligible: mcpInfo.hasMcp,
+    };
+  } catch (err) {
+    Bun.spawn(["rm", "-rf", tmpDir], { stdout: "pipe", stderr: "pipe" });
+    return {
+      repoUrl,
+      hasMcp: false,
+      mcpPackage: null,
+      files: [],
+      eligible: false,
+    };
+  }
 }

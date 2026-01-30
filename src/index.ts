@@ -10,7 +10,7 @@ import { discoverEndpoints } from "./discover";
 import { runMonitorPass, runMonitorLoop, sendDigest } from "./monitor";
 import { alertEndpointDown, alertEndpointRecovered, alertBatchSummary, alertVerifyResult } from "./telegram";
 import { openOutreachIssue } from "./outreach";
-import { evaluateRepo, printReport } from "./evaluate";
+import { evaluateRepo, printReport, verifyMcp } from "./evaluate";
 import { generateSbtcPR } from "./pr-generator";
 import type { VerifyResult } from "./types";
 import type { EndpointStatus, Endpoint } from "./db";
@@ -27,6 +27,7 @@ const HELP = `
     digest    Send daily status digest
     outreach  Open a GitHub issue to propose sBTC support
     evaluate  Analyze a repo for x402/sBTC integration
+    verify-mcp  Check if a repo has Stacks MCP setup
 
   verify:
     --endpoint, -e <url>    Single endpoint to verify
@@ -128,6 +129,8 @@ async function main() {
       return cmdOutreach(args, config);
     case "evaluate":
       return cmdEvaluate(args, config);
+    case "verify-mcp":
+      return cmdVerifyMcp(args);
     case "help":
     default:
       console.log(HELP);
@@ -492,6 +495,38 @@ async function cmdEvaluate(args: string[], config: Config) {
   } else if (!auto && !report.hasSbtc) {
     console.log("  Tip: add --auto to generate a PR with sBTC integration\n");
   }
+}
+
+// ── verify-mcp ───────────────────────────────────────────
+
+async function cmdVerifyMcp(args: string[]) {
+  const flags = parseFlags(args);
+  const repoUrl = flags._pos as string;
+
+  if (!repoUrl) {
+    console.log("  Usage: appleseed verify-mcp <github-repo-url>\n");
+    console.log("  Checks if a repo has Stacks MCP setup for agent verification.\n");
+    process.exit(1);
+  }
+
+  console.log(`  [verify-mcp] Checking ${repoUrl}...`);
+  const result = await verifyMcp(repoUrl);
+
+  console.log(`\n  --- MCP Verification ---`);
+  console.log(`  Repo: ${repoUrl}`);
+  console.log(`  Has MCP: ${result.hasMcp ? "yes" : "no"}`);
+  if (result.mcpPackage) {
+    console.log(`  Package: ${result.mcpPackage}`);
+  }
+  console.log(`  Eligible for airdrop: ${result.eligible ? "YES" : "no"}`);
+
+  if (result.files.length > 0) {
+    console.log(`\n  MCP files found:`);
+    for (const f of result.files) {
+      console.log(`    ${f}`);
+    }
+  }
+  console.log("");
 }
 
 // ── helpers ───────────────────────────────────────────────
