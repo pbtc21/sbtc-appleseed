@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.52.0",
     "x402-stacks": "^1.1.1"
   },
   "devDependencies": {

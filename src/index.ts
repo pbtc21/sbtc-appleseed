@@ -12,6 +12,7 @@ import { alertEndpointDown, alertEndpointRecovered, alertBatchSummary, alertVeri
 import { openOutreachIssue } from "./outreach";
 import { evaluateRepo, printReport, verifyMcp } from "./evaluate";
 import { generateSbtcPR } from "./pr-generator";
+import { runMoltbookCommand } from "./moltbook";
 import type { VerifyResult } from "./types";
 import type { EndpointStatus, Endpoint } from "./db";
 
@@ -28,6 +29,7 @@ const HELP = `
     outreach  Open a GitHub issue to propose sBTC support
     evaluate  Analyze a repo for x402/sBTC integration
     verify-mcp  Check if a repo has Stacks MCP setup
+    moltbook  AI agent social outreach on Moltbook
 
   verify:
     --endpoint, -e <url>    Single endpoint to verify
@@ -65,6 +67,14 @@ const HELP = `
     <repo-url>              GitHub repo URL to evaluate
     --auto                  Auto-generate PR if possible
 
+  moltbook:
+    post                    Create new post in submolt
+    reply                   Reply to high-engagement threads
+    run                     Full outreach pass (post + replies)
+    variants                Generate A/B test variants
+    --dry-run               Preview without posting
+    --theme <text>          Theme for post generation
+
   Examples:
     bun run appleseed verify -e https://api.example.com/data
     bun run appleseed verify --all
@@ -74,6 +84,8 @@ const HELP = `
     bun run appleseed monitor --once
     bun run appleseed outreach https://api.example.com/data --repo https://github.com/org/repo
     bun run appleseed evaluate https://github.com/org/repo --auto
+    bun run appleseed moltbook post --dry-run
+    bun run appleseed moltbook run
 `;
 
 function parseCommand(): { command: string; args: string[] } {
@@ -131,6 +143,8 @@ async function main() {
       return cmdEvaluate(args, config);
     case "verify-mcp":
       return cmdVerifyMcp(args);
+    case "moltbook":
+      return cmdMoltbook(args);
     case "help":
     default:
       console.log(HELP);
@@ -527,6 +541,14 @@ async function cmdVerifyMcp(args: string[]) {
     }
   }
   console.log("");
+}
+
+// ── moltbook ──────────────────────────────────────────────
+
+async function cmdMoltbook(args: string[]) {
+  const action = args[0] || "help";
+  const flags = parseFlags(args.slice(1));
+  await runMoltbookCommand(action, flags);
 }
 
 // ── helpers ───────────────────────────────────────────────
